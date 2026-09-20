@@ -59,7 +59,7 @@ def main():
             bar1 = closed[-1]
 
             current_time = time.time()
-            if current_time - last_signal_time > 60:
+            if current_time - last_signal_time > 300:
                 if check_bearish_setup(bar2, bar1):
                     msg = (
                         f"🔴 BEARISH JAM SIGNAL\n"
