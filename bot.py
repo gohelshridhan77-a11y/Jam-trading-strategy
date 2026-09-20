@@ -6,7 +6,6 @@ from jam_strategy import check_bearish_setup, check_bullish_setup
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID         = os.environ.get("CHAT_ID")
 TWELVE_API_KEY  = os.environ.get("TWELVE_API_KEY")
-ALPHA_API_KEY   = os.environ.get("ALPHA_API_KEY")
 
 # ════════════════════════════════════
 # XAUUSD via Twelve Data
@@ -14,22 +13,21 @@ ALPHA_API_KEY   = os.environ.get("ALPHA_API_KEY")
 XAUUSD_TIMEFRAMES = ["5min", "15min", "1h", "4h"]
 
 # ════════════════════════════════════
-# US100 & US30 via Alpha Vantage
-# Interval options: 5min, 15min, 60min
+# US100 & US30 via Yahoo Finance
 # ════════════════════════════════════
 INDEX_WATCHLIST = [
-    {"symbol": "NDX",  "name": "US100", "interval": "5min"},
-    {"symbol": "NDX",  "name": "US100", "interval": "15min"},
-    {"symbol": "NDX",  "name": "US100", "interval": "60min"},
-    {"symbol": "DJI",  "name": "US30",  "interval": "5min"},
-    {"symbol": "DJI",  "name": "US30",  "interval": "15min"},
-    {"symbol": "DJI",  "name": "US30",  "interval": "60min"},
+    {"symbol": "NQ=F",  "name": "US100", "interval": "5m"},
+    {"symbol": "NQ=F",  "name": "US100", "interval": "15m"},
+    {"symbol": "NQ=F",  "name": "US100", "interval": "1h"},
+    {"symbol": "YM=F",  "name": "US30",  "interval": "5m"},
+    {"symbol": "YM=F",  "name": "US30",  "interval": "15m"},
+    {"symbol": "YM=F",  "name": "US30",  "interval": "1h"},
 ]
 
 SL_TP = {
     "XAU/USD": {"5min": (80,160),  "15min": (150,300), "1h": (300,600),  "4h": (600,1200)},
-    "US100":   {"5min": (30,60),   "15min": (50,100),  "60min": (100,200), "4h": (200,400)},
-    "US30":    {"5min": (50,100),  "15min": (100,200), "60min": (200,400), "4h": (400,800)},
+    "US100":   {"5m":   (30,60),   "15m":   (50,100),  "1h": (100,200)},
+    "US30":    {"5m":   (50,100),  "15m":   (100,200), "1h": (200,400)},
 }
 
 def send_message(text):
@@ -61,33 +59,42 @@ def get_xauusd_candles(interval):
             continue
     return candles
 
-def get_index_candles(symbol, interval):
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function": "TIME_SERIES_INTRADAY",
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": "compact",
-        "apikey": ALPHA_API_KEY,
+def get_yahoo_candles(symbol, interval):
+    # Map interval to Yahoo Finance range
+    range_map = {
+        "5m":  "2d",
+        "15m": "5d",
+        "1h":  "1mo",
     }
-    r = requests.get(url, params=params)
+    period = range_map.get(interval, "5d")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {
+        "interval": interval,
+        "range": period,
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+    r = requests.get(url, params=params, headers=headers)
     data = r.json()
-    key = f"Time Series ({interval})"
-    if key not in data:
-        raise Exception(f"AlphaVantage error: {data}")
-    candles = []
-    for ts in sorted(data[key].keys()):
-        c = data[key][ts]
-        try:
-            candles.append({
-                "open":  float(c["1. open"]),
-                "high":  float(c["2. high"]),
-                "low":   float(c["3. low"]),
-                "close": float(c["4. close"]),
-            })
-        except (ValueError, KeyError):
-            continue
-    return candles[-5:]
+
+    try:
+        timestamps = data["chart"]["result"][0]["timestamp"]
+        ohlc = data["chart"]["result"][0]["indicators"]["quote"][0]
+        candles = []
+        for i in range(len(timestamps)):
+            try:
+                candles.append({
+                    "open":  float(ohlc["open"][i]),
+                    "high":  float(ohlc["high"][i]),
+                    "low":   float(ohlc["low"][i]),
+                    "close": float(ohlc["close"][i]),
+                })
+            except (TypeError, ValueError):
+                continue
+        return candles[-5:]
+    except (KeyError, IndexError, TypeError) as e:
+        raise Exception(f"Yahoo error for {symbol}: {e}")
 
 def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1):
     emoji = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
@@ -106,7 +113,7 @@ def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1):
         f"Bar1 Close: {bar1['close']}"
     )
 
-def check_and_alert(symbol, display_name, interval, candles, last_signal_time):
+def check_and_alert(display_name, interval, candles, last_signal_time):
     closed = candles[:-1]
     if len(closed) < 2:
         return last_signal_time
@@ -115,7 +122,6 @@ def check_and_alert(symbol, display_name, interval, candles, last_signal_time):
     bar1 = closed[-1]
     key  = f"{display_name}_{interval}"
     current_time = time.time()
-
     sl_val, tp_val = SL_TP.get(display_name, {}).get(interval, (100, 200))
 
     if current_time - last_signal_time.get(key, 0) > 300:
@@ -154,18 +160,18 @@ def main():
             try:
                 candles = get_xauusd_candles(interval)
                 last_signal_time = check_and_alert(
-                    "XAU/USD", "XAU/USD", interval, candles, last_signal_time
+                    "XAU/USD", interval, candles, last_signal_time
                 )
             except Exception as e:
                 send_message(f"⚠️ XAUUSD {interval}: {str(e)}")
             time.sleep(15)
 
-        # ── US100 & US30 via Alpha Vantage ──
+        # ── US100 & US30 via Yahoo Finance ──
         for item in INDEX_WATCHLIST:
             try:
-                candles = get_index_candles(item["symbol"], item["interval"])
+                candles = get_yahoo_candles(item["symbol"], item["interval"])
                 last_signal_time = check_and_alert(
-                    item["symbol"], item["name"], item["interval"], candles, last_signal_time
+                    item["name"], item["interval"], candles, last_signal_time
                 )
             except Exception as e:
                 send_message(f"⚠️ {item['name']} {item['interval']}: {str(e)}")
