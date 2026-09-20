@@ -8,12 +8,26 @@ CHAT_ID = os.environ.get("CHAT_ID")
 TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY")
 
 # ════════════════════════════════════
-# CONFIGURE YOUR SYMBOLS & TIMEFRAMES
+# ALL SYMBOLS & TIMEFRAMES
 # ════════════════════════════════════
 WATCHLIST = [
-    {"symbol": "XAU/USD",  "interval": "15min", "sl_pips": 150, "tp_pips": 300},
-    {"symbol": "US100",    "interval": "15min", "sl_pips": 50,  "tp_pips": 100},
-    {"symbol": "US30",     "interval": "15min", "sl_pips": 100, "tp_pips": 200},
+    # XAUUSD - 4 timeframes
+    {"symbol": "XAU/USD", "interval": "5min",  "sl_pips": 80,  "tp_pips": 160},
+    {"symbol": "XAU/USD", "interval": "15min", "sl_pips": 150, "tp_pips": 300},
+    {"symbol": "XAU/USD", "interval": "1h",    "sl_pips": 300, "tp_pips": 600},
+    {"symbol": "XAU/USD", "interval": "4h",    "sl_pips": 600, "tp_pips": 1200},
+
+    # US100 - 4 timeframes
+    {"symbol": "US100",   "interval": "5min",  "sl_pips": 30,  "tp_pips": 60},
+    {"symbol": "US100",   "interval": "15min", "sl_pips": 50,  "tp_pips": 100},
+    {"symbol": "US100",   "interval": "1h",    "sl_pips": 100, "tp_pips": 200},
+    {"symbol": "US100",   "interval": "4h",    "sl_pips": 200, "tp_pips": 400},
+
+    # US30 - 4 timeframes
+    {"symbol": "US30",    "interval": "5min",  "sl_pips": 50,  "tp_pips": 100},
+    {"symbol": "US30",    "interval": "15min", "sl_pips": 100, "tp_pips": 200},
+    {"symbol": "US30",    "interval": "1h",    "sl_pips": 200, "tp_pips": 400},
+    {"symbol": "US30",    "interval": "4h",    "sl_pips": 400, "tp_pips": 800},
 ]
 
 def send_message(text):
@@ -32,7 +46,7 @@ def get_candles(symbol, interval):
     data = r.json()
 
     if "values" not in data:
-        raise Exception(f"API error for {symbol}: {data}")
+        raise Exception(f"API error for {symbol} {interval}: {data}")
 
     candles = []
     for c in reversed(data["values"]):
@@ -48,11 +62,20 @@ def get_candles(symbol, interval):
     return candles
 
 def main():
-    send_message("✅ JAM Trading Bot is now running!\nMonitoring: XAUUSD | US100 | US30")
-    
+    send_message(
+        "✅ JAM Trading Bot is now running!\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📊 Monitoring:\n"
+        "🥇 XAUUSD → 5m | 15m | 1h | 4h\n"
+        "📈 US100  → 5m | 15m | 1h | 4h\n"
+        "📈 US30   → 5m | 15m | 1h | 4h\n"
+        "━━━━━━━━━━━━━━━"
+    )
+
     last_signal_time = {}
     for item in WATCHLIST:
-        last_signal_time[item["symbol"]] = 0
+        key = f"{item['symbol']}_{item['interval']}"
+        last_signal_time[key] = 0
 
     while True:
         for item in WATCHLIST:
@@ -60,19 +83,21 @@ def main():
             interval = item["interval"]
             sl_pips  = item["sl_pips"]
             tp_pips  = item["tp_pips"]
+            key      = f"{symbol}_{interval}"
 
             try:
                 candles = get_candles(symbol, interval)
-                closed = candles[:-1]
+                closed  = candles[:-1]
 
                 if len(closed) < 2:
+                    time.sleep(15)
                     continue
 
                 bar2 = closed[-2]
                 bar1 = closed[-1]
                 current_time = time.time()
 
-                if current_time - last_signal_time[symbol] > 300:
+                if current_time - last_signal_time[key] > 300:
 
                     if check_bearish_setup(bar2, bar1):
                         entry = bar1["close"]
@@ -92,7 +117,7 @@ def main():
                             f"Bar1 Close: {bar1['close']}"
                         )
                         send_message(msg)
-                        last_signal_time[symbol] = current_time
+                        last_signal_time[key] = current_time
 
                     elif check_bullish_setup(bar2, bar1):
                         entry = bar1["close"]
@@ -112,12 +137,12 @@ def main():
                             f"Bar1 Close: {bar1['close']}"
                         )
                         send_message(msg)
-                        last_signal_time[symbol] = current_time
+                        last_signal_time[key] = current_time
 
             except Exception as e:
-                send_message(f"⚠️ Error {symbol}: {str(e)}")
+                send_message(f"⚠️ Error {symbol} {interval}: {str(e)}")
 
-            # Delay between each symbol to avoid API rate limit
+            # Wait between calls to respect API limit
             time.sleep(15)
 
         time.sleep(60)
