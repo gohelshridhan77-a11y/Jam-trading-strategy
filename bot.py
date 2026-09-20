@@ -1,17 +1,17 @@
 import requests
 import time
 import os
+import json
+import asyncio
+import websockets
 from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID         = os.environ.get("CHAT_ID")
 TWELVE_API_KEY  = os.environ.get("TWELVE_API_KEY")
-
-# ════════════════════════════════════
-# INDIAN TIME = UTC + 5:30
-# Market Hours: Mon-Fri 8:00AM - 12:00AM IST
-# ════════════════════════════════════
+DERIV_TOKEN     = os.environ.get("DERIV_TOKEN")
+DERIV_ACCOUNT   = os.environ.get("DERIV_ACCOUNT")
 
 XAUUSD_TIMEFRAMES = ["5min", "15min", "1h", "4h"]
 
@@ -30,6 +30,13 @@ SL_TP = {
     "US30":    {"5m":   (50,100),  "15m":   (100,200), "1h": (200,400)},
 }
 
+# Deriv symbol mapping
+DERIV_SYMBOLS = {
+    "XAU/USD": "frxXAUUSD",
+    "US100":   "R_100",
+    "US30":    "Wall Street 30",
+}
+
 def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": text})
@@ -41,10 +48,8 @@ def get_ist_time():
 
 def is_market_open():
     ist = get_ist_time()
-    # Monday=0 to Friday=4
     if ist.weekday() > 4:
         return False
-    # 8:00 AM to 11:59 PM IST
     market_open  = ist.replace(hour=8,  minute=0,  second=0)
     market_close = ist.replace(hour=23, minute=59, second=0)
     return market_open <= ist <= market_close
@@ -79,17 +84,10 @@ def get_xauusd_candles(interval):
     return candles
 
 def get_yahoo_candles(symbol, interval):
-    range_map = {
-        "5m":  "2d",
-        "15m": "5d",
-        "1h":  "1mo",
-    }
+    range_map = {"5m": "2d", "15m": "5d", "1h": "1mo"}
     period = range_map.get(interval, "5d")
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {
-        "interval": interval,
-        "range": period,
-    }
+    params = {"interval": interval, "range": period}
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, params=params, headers=headers)
     data = r.json()
@@ -111,14 +109,65 @@ def get_yahoo_candles(symbol, interval):
     except (KeyError, IndexError, TypeError) as e:
         raise Exception(f"Yahoo error for {symbol}: {e}")
 
-def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1):
+async def deriv_place_trade(symbol, direction, entry, sl, tp):
+    uri = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+    try:
+        async with websockets.connect(uri) as ws:
+            # Authorize
+            await ws.send(json.dumps({
+                "authorize": DERIV_TOKEN
+            }))
+            auth = json.loads(await ws.recv())
+            if "error" in auth:
+                raise Exception(f"Auth error: {auth['error']['message']}")
+
+            # Map to Deriv contract type
+            contract_type = "CALL" if direction == "BUY" else "PUT"
+            deriv_symbol  = DERIV_SYMBOLS.get(symbol, "frxXAUUSD")
+
+            # Place trade
+            await ws.send(json.dumps({
+                "buy": 1,
+                "price": 10,  # Stake amount in USD
+                "parameters": {
+                    "amount": 10,
+                    "basis": "stake",
+                    "contract_type": contract_type,
+                    "currency": "USD",
+                    "duration": 15,
+                    "duration_unit": "m",
+                    "symbol": deriv_symbol,
+                }
+            }))
+            result = json.loads(await ws.recv())
+            if "error" in result:
+                raise Exception(f"Trade error: {result['error']['message']}")
+
+            contract_id = result["buy"]["contract_id"]
+            return contract_id
+
+    except Exception as e:
+        raise Exception(f"Deriv trade failed: {str(e)}")
+
+def place_trade(symbol, direction, entry, sl, tp):
+    try:
+        contract_id = asyncio.run(
+            deriv_place_trade(symbol, direction, entry, sl, tp)
+        )
+        return contract_id
+    except Exception as e:
+        send_message(f"⚠️ Trade placement failed: {str(e)}")
+        return None
+
+def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, contract_id=None):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
     action = "SELL" if direction == "SELL" else "BUY"
     risk   = abs(entry - sl)
     reward = abs(tp - entry)
     rr     = round(reward / risk, 2) if risk > 0 else 0
     timestamp = get_timestamp()
-    return (
+
+    msg = (
         f"{emoji} JAM SIGNAL\n"
         f"━━━━━━━━━━━━━━━\n"
         f"📊 Symbol: {symbol}\n"
@@ -131,8 +180,18 @@ def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1):
         f"⚖️ Risk/Reward: 1:{rr}\n"
         f"━━━━━━━━━━━━━━━\n"
         f"Bar2 Open: {bar2['open']}\n"
-        f"Bar1 Close: {bar1['close']}"
+        f"Bar1 Close: {bar1['close']}\n"
     )
+
+    if contract_id:
+        msg += f"━━━━━━━━━━━━━━━\n"
+        msg += f"🤖 Auto Trade: ✅ Placed!\n"
+        msg += f"📋 Contract ID: {contract_id}"
+    else:
+        msg += f"━━━━━━━━━━━━━━━\n"
+        msg += f"🤖 Auto Trade: ❌ Failed"
+
+    return msg
 
 def check_and_alert(display_name, interval, candles, last_signal_time):
     closed = candles[:-1]
@@ -150,9 +209,10 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
             entry = bar1["close"]
             sl    = round(entry + sl_val, 3)
             tp    = round(entry - tp_val, 3)
+            contract_id = place_trade(display_name, "SELL", entry, sl, tp)
             send_message(build_message(
                 "SELL", display_name, interval,
-                entry, sl, tp, bar2, bar1
+                entry, sl, tp, bar2, bar1, contract_id
             ))
             last_signal_time[key] = current_time
 
@@ -160,9 +220,10 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
             entry = bar1["close"]
             sl    = round(entry - sl_val, 3)
             tp    = round(entry + tp_val, 3)
+            contract_id = place_trade(display_name, "BUY", entry, sl, tp)
             send_message(build_message(
                 "BUY", display_name, interval,
-                entry, sl, tp, bar2, bar1
+                entry, sl, tp, bar2, bar1, contract_id
             ))
             last_signal_time[key] = current_time
 
@@ -170,15 +231,16 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
 
 def main():
     send_message(
-        "✅ JAM Trading Bot is now running!\n"
+        "✅ JAM Auto Trading Bot is now running!\n"
         "━━━━━━━━━━━━━━━\n"
         "📊 Monitoring:\n"
         "🥇 XAUUSD → 5m | 15m | 1h | 4h\n"
         "📈 US100  → 5m | 15m | 1h\n"
         "📈 US30   → 5m | 15m | 1h\n"
         "━━━━━━━━━━━━━━━\n"
-        "🕐 Market Hours:\n"
-        "Mon-Fri 8:00AM - 12:00AM IST"
+        "🤖 Auto Trading: ENABLED\n"
+        "💰 Account: DEMO\n"
+        "🕐 Market Hours: Mon-Fri 8AM-12AM IST"
     )
 
     last_signal_time = {}
@@ -187,7 +249,6 @@ def main():
     while True:
         if not is_market_open():
             ist = get_ist_time()
-            # Send one message when market closes
             if market_was_open:
                 send_message(
                     "🔕 Market is now closed!\n"
@@ -200,7 +261,6 @@ def main():
             time.sleep(60)
             continue
 
-        # Market is open
         if not market_was_open:
             send_message(
                 "🔔 Market is now open!\n"
