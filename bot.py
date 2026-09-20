@@ -208,8 +208,8 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
     if current_time - last_signal_time.get(key, 0) > 300:
         if check_bearish_setup(bar2, bar1):
             entry = bar1["close"]
-            sl    = round(entry + sl_val, 3)
-            tp    = round(entry - tp_val, 3)
+            sl = round(bar1['high'] + sl_val, 3)
+tp = round(entry - sl_val, 3)
             contract_id = place_trade(display_name, "SELL", entry, sl, tp)
             send_message(build_message(
                 "SELL", display_name, interval,
@@ -219,8 +219,8 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
 
         elif check_bullish_setup(bar2, bar1):
             entry = bar1["close"]
-            sl    = round(entry - sl_val, 3)
-            tp    = round(entry + tp_val, 3)
+            sl = round(bar1['low'] - sl_val, 3)
+tp = round(entry + sl_val, 3)
             contract_id = place_trade(display_name, "BUY", entry, sl, tp)
             send_message(build_message(
                 "BUY", display_name, interval,
