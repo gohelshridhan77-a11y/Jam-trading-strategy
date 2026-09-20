@@ -1,12 +1,17 @@
 import requests
 import time
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID         = os.environ.get("CHAT_ID")
 TWELVE_API_KEY  = os.environ.get("TWELVE_API_KEY")
+
+# ════════════════════════════════════
+# INDIAN TIME = UTC + 5:30
+# Market Hours: Mon-Fri 8:00AM - 12:00AM IST
+# ════════════════════════════════════
 
 XAUUSD_TIMEFRAMES = ["5min", "15min", "1h", "4h"]
 
@@ -29,9 +34,24 @@ def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": text})
 
+def get_ist_time():
+    utc_now = datetime.now(timezone.utc)
+    ist = utc_now + timedelta(hours=5, minutes=30)
+    return ist
+
+def is_market_open():
+    ist = get_ist_time()
+    # Monday=0 to Friday=4
+    if ist.weekday() > 4:
+        return False
+    # 8:00 AM to 11:59 PM IST
+    market_open  = ist.replace(hour=8,  minute=0,  second=0)
+    market_close = ist.replace(hour=23, minute=59, second=0)
+    return market_open <= ist <= market_close
+
 def get_timestamp():
-    now = datetime.now(timezone.utc)
-    return now.strftime("%Y-%m-%d %H:%M UTC")
+    ist = get_ist_time()
+    return ist.strftime("%Y-%m-%d %H:%M IST")
 
 def get_xauusd_candles(interval):
     url = "https://api.twelvedata.com/time_series"
@@ -94,15 +114,10 @@ def get_yahoo_candles(symbol, interval):
 def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
     action = "SELL" if direction == "SELL" else "BUY"
-
-    # Risk Reward Ratio
     risk   = abs(entry - sl)
     reward = abs(tp - entry)
     rr     = round(reward / risk, 2) if risk > 0 else 0
-
-    # Timestamp
     timestamp = get_timestamp()
-
     return (
         f"{emoji} JAM SIGNAL\n"
         f"━━━━━━━━━━━━━━━\n"
@@ -161,12 +176,38 @@ def main():
         "🥇 XAUUSD → 5m | 15m | 1h | 4h\n"
         "📈 US100  → 5m | 15m | 1h\n"
         "📈 US30   → 5m | 15m | 1h\n"
-        "━━━━━━━━━━━━━━━"
+        "━━━━━━━━━━━━━━━\n"
+        "🕐 Market Hours:\n"
+        "Mon-Fri 8:00AM - 12:00AM IST"
     )
 
     last_signal_time = {}
+    market_was_open = False
 
     while True:
+        if not is_market_open():
+            ist = get_ist_time()
+            # Send one message when market closes
+            if market_was_open:
+                send_message(
+                    "🔕 Market is now closed!\n"
+                    "Bot will resume Monday 8:00AM IST"
+                    if ist.weekday() == 4
+                    else "🔕 Market is now closed!\n"
+                    "Bot will resume tomorrow 8:00AM IST"
+                )
+                market_was_open = False
+            time.sleep(60)
+            continue
+
+        # Market is open
+        if not market_was_open:
+            send_message(
+                "🔔 Market is now open!\n"
+                "JAM Bot is scanning for signals..."
+            )
+            market_was_open = True
+
         # ── XAUUSD via Twelve Data ──
         for interval in XAUUSD_TIMEFRAMES:
             try:
