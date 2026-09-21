@@ -7,11 +7,11 @@ import websockets
 from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID         = os.environ.get("CHAT_ID")
-TWELVE_API_KEY  = os.environ.get("TWELVE_API_KEY")
-DERIV_TOKEN     = os.environ.get("DERIV_TOKEN")
-DERIV_ACCOUNT   = os.environ.get("DERIV_ACCOUNT")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID        = os.environ.get("CHAT_ID")
+TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY")
+DERIV_TOKEN    = os.environ.get("DERIV_TOKEN")
+DERIV_ACCOUNT  = os.environ.get("DERIV_ACCOUNT")
 
 XAUUSD_TIMEFRAMES = ["5min", "15min", "1h", "4h"]
 
@@ -25,13 +25,11 @@ INDEX_WATCHLIST = [
 ]
 
 SL_TP = {
-    "XAU/USD": {"5min": (80,80),   "15min": (150,150), "1h": (300,300),  "4h": (600,600)},
+    "XAU/USD": {"5min": (80,80),   "15min": (150,150), "1h": (300,300), "4h": (600,600)},
     "US100":   {"5m":   (30,30),   "15m":   (50,50),   "1h": (100,100)},
     "US30":    {"5m":   (50,50),   "15m":   (100,100), "1h": (200,200)},
 }
-}
 
-# Deriv symbol mapping
 DERIV_SYMBOLS = {
     "XAU/USD": "frxXAUUSD",
     "US100":   "R_100",
@@ -114,22 +112,17 @@ async def deriv_place_trade(symbol, direction, entry, sl, tp):
     uri = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
     try:
         async with websockets.connect(uri) as ws:
-            # Authorize
-            await ws.send(json.dumps({
-                "authorize": DERIV_TOKEN
-            }))
+            await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
             auth = json.loads(await ws.recv())
             if "error" in auth:
                 raise Exception(f"Auth error: {auth['error']['message']}")
 
-            # Map to Deriv contract type
             contract_type = "CALL" if direction == "BUY" else "PUT"
             deriv_symbol  = DERIV_SYMBOLS.get(symbol, "frxXAUUSD")
 
-            # Place trade
             await ws.send(json.dumps({
                 "buy": 1,
-                "price": 10,  # Stake amount in USD
+                "price": 10,
                 "parameters": {
                     "amount": 10,
                     "basis": "stake",
@@ -144,8 +137,7 @@ async def deriv_place_trade(symbol, direction, entry, sl, tp):
             if "error" in result:
                 raise Exception(f"Trade error: {result['error']['message']}")
 
-            contract_id = result["buy"]["contract_id"]
-            return contract_id
+            return result["buy"]["contract_id"]
 
     except Exception as e:
         raise Exception(f"Deriv trade failed: {str(e)}")
@@ -157,7 +149,7 @@ def place_trade(symbol, direction, entry, sl, tp):
         )
         return contract_id
     except Exception as e:
-        send_message(f"⚠️ Trade placement failed: {str(e)}")
+        send_message(f"⚠️ Trade failed: {str(e)}")
         return None
 
 def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, contract_id=None):
@@ -182,16 +174,13 @@ def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, contra
         f"━━━━━━━━━━━━━━━\n"
         f"Bar2 Open: {bar2['open']}\n"
         f"Bar1 Close: {bar1['close']}\n"
+        f"━━━━━━━━━━━━━━━\n"
     )
-
     if contract_id:
-        msg += f"━━━━━━━━━━━━━━━\n"
-        msg += f"🤖 Auto Trade: ✅ Placed!\n"
+        msg += f"🤖 Auto Trade: Placed!\n"
         msg += f"📋 Contract ID: {contract_id}"
     else:
-        msg += f"━━━━━━━━━━━━━━━\n"
-        msg += f"🤖 Auto Trade: ❌ Failed"
-
+        msg += f"🤖 Auto Trade: Failed"
     return msg
 
 def check_and_alert(display_name, interval, candles, last_signal_time):
@@ -203,30 +192,34 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
     bar1 = closed[-1]
     key  = f"{display_name}_{interval}"
     current_time = time.time()
-    sl_val, tp_val = SL_TP.get(display_name, {}).get(interval, (100, 200))
+    sl_val, tp_val = SL_TP.get(display_name, {}).get(interval, (100, 100))
 
     if current_time - last_signal_time.get(key, 0) > 300:
-        if check_bearish_setup(bar2, bar1):
-            entry = bar1["close"]
-            sl = round(bar1['high'] + sl_val, 3)
-tp = round(entry - sl_val, 3)
-            contract_id = place_trade(display_name, "SELL", entry, sl, tp)
-            send_message(build_message(
-                "SELL", display_name, interval,
-                entry, sl, tp, bar2, bar1, contract_id
-            ))
-            last_signal_time[key] = current_time
+        try:
+            if check_bearish_setup(bar2, bar1):
+                entry = bar1["close"]
+                sl    = round(bar1["high"] + sl_val, 3)
+                tp    = round(entry - sl_val, 3)
+                contract_id = place_trade(display_name, "SELL", entry, sl, tp)
+                send_message(build_message(
+                    "SELL", display_name, interval,
+                    entry, sl, tp, bar2, bar1, contract_id
+                ))
+                last_signal_time[key] = current_time
 
-        elif check_bullish_setup(bar2, bar1):
-            entry = bar1["close"]
-            sl = round(bar1['low'] - sl_val, 3)
-tp = round(entry + sl_val, 3)
-            contract_id = place_trade(display_name, "BUY", entry, sl, tp)
-            send_message(build_message(
-                "BUY", display_name, interval,
-                entry, sl, tp, bar2, bar1, contract_id
-            ))
-            last_signal_time[key] = current_time
+            elif check_bullish_setup(bar2, bar1):
+                entry = bar1["close"]
+                sl    = round(bar1["low"] - sl_val, 3)
+                tp    = round(entry + sl_val, 3)
+                contract_id = place_trade(display_name, "BUY", entry, sl, tp)
+                send_message(build_message(
+                    "BUY", display_name, interval,
+                    entry, sl, tp, bar2, bar1, contract_id
+                ))
+                last_signal_time[key] = current_time
+
+        except Exception as e:
+            send_message(f"⚠️ Error {display_name} {interval}: {str(e)}")
 
     return last_signal_time
 
@@ -269,7 +262,6 @@ def main():
             )
             market_was_open = True
 
-        # ── XAUUSD via Twelve Data ──
         for interval in XAUUSD_TIMEFRAMES:
             try:
                 candles = get_xauusd_candles(interval)
@@ -280,7 +272,6 @@ def main():
                 send_message(f"⚠️ XAUUSD {interval}: {str(e)}")
             time.sleep(15)
 
-        # ── US100 & US30 via Yahoo Finance ──
         for item in INDEX_WATCHLIST:
             try:
                 candles = get_yahoo_candles(item["symbol"], item["interval"])
