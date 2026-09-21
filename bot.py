@@ -7,11 +7,12 @@ import websockets
 from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID        = os.environ.get("CHAT_ID")
-TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY")
-DERIV_TOKEN    = os.environ.get("DERIV_TOKEN")
-DERIV_ACCOUNT  = os.environ.get("DERIV_ACCOUNT")
+TELEGRAM_TOKEN        = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID               = os.environ.get("CHAT_ID")
+TWELVE_API_KEY        = os.environ.get("TWELVE_API_KEY")
+CTRADER_CLIENT_ID     = os.environ.get("CTRADER_CLIENT_ID")
+CTRADER_CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET")
+CTRADER_ACCOUNT_ID    = int(os.environ.get("CTRADER_ACCOUNT_ID", "0"))
 
 XAUUSD_TIMEFRAMES = ["5min", "15min", "1h", "4h"]
 
@@ -30,10 +31,11 @@ SL_TP = {
     "US30":    {"5m":   (50,50),   "15m":   (100,100), "1h": (200,200)},
 }
 
-DERIV_SYMBOLS = {
-    "XAU/USD": "frxXAUUSD",
-    "US100":   "R_100",
-    "US30":    "Wall Street 30",
+# cTrader symbol mapping
+CTRADER_SYMBOLS = {
+    "XAU/USD": "XAUUSD",
+    "US100":   "NAS100",
+    "US30":    "DJ30",
 }
 
 def send_message(text):
@@ -42,8 +44,7 @@ def send_message(text):
 
 def get_ist_time():
     utc_now = datetime.now(timezone.utc)
-    ist = utc_now + timedelta(hours=5, minutes=30)
-    return ist
+    return utc_now + timedelta(hours=5, minutes=30)
 
 def is_market_open():
     ist = get_ist_time()
@@ -108,51 +109,87 @@ def get_yahoo_candles(symbol, interval):
     except (KeyError, IndexError, TypeError) as e:
         raise Exception(f"Yahoo error for {symbol}: {e}")
 
-async def deriv_place_trade(symbol, direction, entry, sl, tp):
-    uri = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+async def get_ctrader_token():
+    url = "https://connect.spotware.com/apps/token"
+    params = {
+        "grant_type": "client_credentials",
+        "client_id": CTRADER_CLIENT_ID,
+        "client_secret": CTRADER_CLIENT_SECRET,
+    }
+    r = requests.post(url, data=params)
+    data = r.json()
+    if "accessToken" not in data:
+        raise Exception(f"Token error: {data}")
+    return data["accessToken"]
+
+async def ctrader_place_trade(symbol, direction, volume_lots=0.01):
     try:
+        token = await get_ctrader_token()
+        uri = "wss://live.ctraderapi.com:5036"
+
         async with websockets.connect(uri) as ws:
-            await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-            auth = json.loads(await ws.recv())
-            if "error" in auth:
-                raise Exception(f"Auth error: {auth['error']['message']}")
-
-            contract_type = "CALL" if direction == "BUY" else "PUT"
-            deriv_symbol  = DERIV_SYMBOLS.get(symbol, "frxXAUUSD")
-
-            await ws.send(json.dumps({
-                "buy": 1,
-                "price": 10,
-                "parameters": {
-                    "amount": 10,
-                    "basis": "stake",
-                    "contract_type": contract_type,
-                    "currency": "USD",
-                    "duration": 15,
-                    "duration_unit": "m",
-                    "symbol": deriv_symbol,
+            # Authenticate
+            auth_msg = {
+                "clientMsgId": "auth",
+                "payloadType": 2100,
+                "payload": {
+                    "clientId": CTRADER_CLIENT_ID,
+                    "clientSecret": CTRADER_CLIENT_SECRET,
                 }
-            }))
-            result = json.loads(await ws.recv())
-            if "error" in result:
-                raise Exception(f"Trade error: {result['error']['message']}")
+            }
+            await ws.send(json.dumps(auth_msg))
+            await asyncio.sleep(1)
+            await ws.recv()
 
-            return result["buy"]["contract_id"]
+            # Authorize account
+            account_auth = {
+                "clientMsgId": "account_auth",
+                "payloadType": 2102,
+                "payload": {
+                    "ctidTraderAccountId": CTRADER_ACCOUNT_ID,
+                    "accessToken": token,
+                }
+            }
+            await ws.send(json.dumps(account_auth))
+            await asyncio.sleep(1)
+            await ws.recv()
+
+            # Place trade
+            trade_side = 1 if direction == "BUY" else 2
+            ctrade_symbol = CTRADER_SYMBOLS.get(symbol, "XAUUSD")
+
+            order_msg = {
+                "clientMsgId": "new_order",
+                "payloadType": 2106,
+                "payload": {
+                    "ctidTraderAccountId": CTRADER_ACCOUNT_ID,
+                    "symbolName": ctrade_symbol,
+                    "orderType": 1,
+                    "tradeSide": trade_side,
+                    "volume": int(volume_lots * 100000),
+                    "timeInForce": 1,
+                }
+            }
+            await ws.send(json.dumps(order_msg))
+            await asyncio.sleep(1)
+            result = await ws.recv()
+            data = json.loads(result)
+            return data
 
     except Exception as e:
-        raise Exception(f"Deriv trade failed: {str(e)}")
+        raise Exception(f"cTrader trade failed: {str(e)}")
 
-def place_trade(symbol, direction, entry, sl, tp):
+def place_trade(symbol, direction):
     try:
-        contract_id = asyncio.run(
-            deriv_place_trade(symbol, direction, entry, sl, tp)
+        result = asyncio.run(
+            ctrader_place_trade(symbol, direction)
         )
-        return contract_id
+        return f"✅ Placed! {result}"
     except Exception as e:
         send_message(f"⚠️ Trade failed: {str(e)}")
         return None
 
-def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, contract_id=None):
+def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, trade_result=None):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
     action = "SELL" if direction == "SELL" else "BUY"
     risk   = abs(entry - sl)
@@ -176,11 +213,10 @@ def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, contra
         f"Bar1 Close: {bar1['close']}\n"
         f"━━━━━━━━━━━━━━━\n"
     )
-    if contract_id:
-        msg += f"🤖 Auto Trade: Placed!\n"
-        msg += f"📋 Contract ID: {contract_id}"
+    if trade_result:
+        msg += f"🤖 Auto Trade: {trade_result}"
     else:
-        msg += f"🤖 Auto Trade: Failed"
+        msg += f"🤖 Auto Trade: ❌ Failed"
     return msg
 
 def check_and_alert(display_name, interval, candles, last_signal_time):
@@ -200,10 +236,10 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
                 entry = bar1["close"]
                 sl    = round(bar1["high"] + sl_val, 3)
                 tp    = round(entry - sl_val, 3)
-                contract_id = place_trade(display_name, "SELL", entry, sl, tp)
+                trade_result = place_trade(display_name, "SELL")
                 send_message(build_message(
                     "SELL", display_name, interval,
-                    entry, sl, tp, bar2, bar1, contract_id
+                    entry, sl, tp, bar2, bar1, trade_result
                 ))
                 last_signal_time[key] = current_time
 
@@ -211,10 +247,10 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
                 entry = bar1["close"]
                 sl    = round(bar1["low"] - sl_val, 3)
                 tp    = round(entry + sl_val, 3)
-                contract_id = place_trade(display_name, "BUY", entry, sl, tp)
+                trade_result = place_trade(display_name, "BUY")
                 send_message(build_message(
                     "BUY", display_name, interval,
-                    entry, sl, tp, bar2, bar1, contract_id
+                    entry, sl, tp, bar2, bar1, trade_result
                 ))
                 last_signal_time[key] = current_time
 
@@ -232,7 +268,7 @@ def main():
         "📈 US100  → 5m | 15m | 1h\n"
         "📈 US30   → 5m | 15m | 1h\n"
         "━━━━━━━━━━━━━━━\n"
-        "🤖 Auto Trading: ENABLED\n"
+        "🤖 Auto Trading: cTrader ENABLED\n"
         "💰 Account: DEMO\n"
         "🕐 Market Hours: Mon-Fri 8AM-12AM IST"
     )
@@ -258,7 +294,7 @@ def main():
         if not market_was_open:
             send_message(
                 "🔔 Market is now open!\n"
-                "JAM Bot is scanning for signals..."
+                "JAM Bot scanning for signals..."
             )
             market_was_open = True
 
