@@ -58,17 +58,6 @@ def get_timestamp():
     ist = get_ist_time()
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
-def bybit_sign(params, secret):
-    timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
-    param_str = timestamp + BYBIT_API_KEY + recv_window + str(params)
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        param_str.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    return timestamp, signature, recv_window
-
 def place_bybit_trade(symbol, direction, qty="0.01"):
     try:
         bybit_symbol = BYBIT_SYMBOLS.get(symbol, "XAUUSDT")
@@ -82,10 +71,9 @@ def place_bybit_trade(symbol, direction, qty="0.01"):
             "qty": qty,
         }
 
-        import json
         timestamp = str(int(time.time() * 1000))
         recv_window = "5000"
-        body = json.dumps(params)
+        body = json.dumps(params, separators=(',', ':'))
         param_str = timestamp + BYBIT_API_KEY + recv_window + body
 
         signature = hmac.new(
@@ -105,19 +93,20 @@ def place_bybit_trade(symbol, direction, qty="0.01"):
         r = requests.post(
             f"{BYBIT_BASE_URL}/v5/order/create",
             headers=headers,
-            json=params,
+            data=body,
             timeout=10
         )
+
         try:
-    result = r.json()
-except Exception:
-    result = {}
+            result = r.json()
+        except Exception:
+            return f"❌ Parse error: {r.text[:100]}"
 
         if result.get("retCode") == 0:
             order_id = result["result"]["orderId"]
-            return f"✅ Placed! Order ID: {order_id}"
+            return f"✅ Placed! ID: {order_id}"
         else:
-            return f"❌ Failed: {result.get('retMsg')}"
+            return f"❌ Failed: {result.get('retMsg', 'Unknown')}"
 
     except Exception as e:
         return f"❌ Error: {str(e)}"
