@@ -3,6 +3,7 @@ import time
 import os
 import hmac
 import hashlib
+import json
 from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
@@ -107,7 +108,10 @@ def place_bybit_trade(symbol, direction, qty="0.01"):
             json=params,
             timeout=10
         )
-        result = r.json()
+        try:
+    result = r.json()
+except Exception:
+    result = {}
 
         if result.get("retCode") == 0:
             order_id = result["result"]["orderId"]
