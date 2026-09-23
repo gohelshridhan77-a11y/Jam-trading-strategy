@@ -1,18 +1,18 @@
 import requests
 import time
 import os
-import json
-import asyncio
-import websockets
+import hmac
+import hashlib
 from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
-TELEGRAM_TOKEN        = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID               = os.environ.get("CHAT_ID")
-TWELVE_API_KEY        = os.environ.get("TWELVE_API_KEY")
-CTRADER_CLIENT_ID     = os.environ.get("CTRADER_CLIENT_ID")
-CTRADER_CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET")
-CTRADER_ACCOUNT_ID    = int(os.environ.get("CTRADER_ACCOUNT_ID", "0"))
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID          = os.environ.get("CHAT_ID")
+TWELVE_API_KEY   = os.environ.get("TWELVE_API_KEY")
+BYBIT_API_KEY    = os.environ.get("BYBIT_API_KEY")
+BYBIT_API_SECRET = os.environ.get("BYBIT_API_SECRET")
+
+BYBIT_BASE_URL = "https://api-demo.bybit.com"
 
 XAUUSD_TIMEFRAMES = ["5min", "15min", "1h", "4h"]
 
@@ -31,11 +31,10 @@ SL_TP = {
     "US30":    {"5m":   (50,50),   "15m":   (100,100), "1h": (200,200)},
 }
 
-# cTrader symbol mapping
-CTRADER_SYMBOLS = {
-    "XAU/USD": "XAUUSD",
-    "US100":   "NAS100",
-    "US30":    "DJ30",
+BYBIT_SYMBOLS = {
+    "XAU/USD": "XAUUSDT",
+    "US100":   "NQ100USD",
+    "US30":    "US30USD",
 }
 
 def send_message(text):
@@ -57,6 +56,68 @@ def is_market_open():
 def get_timestamp():
     ist = get_ist_time()
     return ist.strftime("%Y-%m-%d %H:%M IST")
+
+def bybit_sign(params, secret):
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    param_str = timestamp + BYBIT_API_KEY + recv_window + str(params)
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        param_str.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    return timestamp, signature, recv_window
+
+def place_bybit_trade(symbol, direction, qty="0.01"):
+    try:
+        bybit_symbol = BYBIT_SYMBOLS.get(symbol, "XAUUSDT")
+        side = "Buy" if direction == "BUY" else "Sell"
+
+        params = {
+            "category": "linear",
+            "symbol": bybit_symbol,
+            "side": side,
+            "orderType": "Market",
+            "qty": qty,
+        }
+
+        timestamp = str(int(time.time() * 1000))
+        recv_window = "5000"
+        param_str = timestamp + BYBIT_API_KEY + recv_window
+        for k, v in sorted(params.items()):
+            param_str += f"{k}={v}&"
+        param_str = param_str.rstrip("&")
+
+        signature = hmac.new(
+            BYBIT_API_SECRET.encode("utf-8"),
+            param_str.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+        headers = {
+            "X-BAPI-API-KEY": BYBIT_API_KEY,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "Content-Type": "application/json"
+        }
+
+        r = requests.post(
+            f"{BYBIT_BASE_URL}/v5/order/create",
+            headers=headers,
+            json=params,
+            timeout=10
+        )
+        result = r.json()
+
+        if result.get("retCode") == 0:
+            order_id = result["result"]["orderId"]
+            return f"✅ Placed! Order ID: {order_id}"
+        else:
+            return f"❌ Failed: {result.get('retMsg')}"
+
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
 
 def get_xauusd_candles(interval):
     url = "https://api.twelvedata.com/time_series"
@@ -109,95 +170,14 @@ def get_yahoo_candles(symbol, interval):
     except (KeyError, IndexError, TypeError) as e:
         raise Exception(f"Yahoo error for {symbol}: {e}")
 
-async def get_ctrader_token():
-    url = "https://connect.spotware.com/apps/token"
-    params = {
-        "grant_type": "client_credentials",
-        "client_id": CTRADER_CLIENT_ID,
-        "client_secret": CTRADER_CLIENT_SECRET,
-    }
-    r = requests.post(url, data=params)
-    data = r.json()
-    if "accessToken" not in data:
-        raise Exception(f"Token error: {data}")
-    return data["accessToken"]
-
-async def ctrader_place_trade(symbol, direction, volume_lots=0.01):
-    try:
-        token = await get_ctrader_token()
-        uri = "wss://live.ctraderapi.com:5036"
-
-        async with websockets.connect(uri) as ws:
-            # Authenticate
-            auth_msg = {
-                "clientMsgId": "auth",
-                "payloadType": 2100,
-                "payload": {
-                    "clientId": CTRADER_CLIENT_ID,
-                    "clientSecret": CTRADER_CLIENT_SECRET,
-                }
-            }
-            await ws.send(json.dumps(auth_msg))
-            await asyncio.sleep(1)
-            await ws.recv()
-
-            # Authorize account
-            account_auth = {
-                "clientMsgId": "account_auth",
-                "payloadType": 2102,
-                "payload": {
-                    "ctidTraderAccountId": CTRADER_ACCOUNT_ID,
-                    "accessToken": token,
-                }
-            }
-            await ws.send(json.dumps(account_auth))
-            await asyncio.sleep(1)
-            await ws.recv()
-
-            # Place trade
-            trade_side = 1 if direction == "BUY" else 2
-            ctrade_symbol = CTRADER_SYMBOLS.get(symbol, "XAUUSD")
-
-            order_msg = {
-                "clientMsgId": "new_order",
-                "payloadType": 2106,
-                "payload": {
-                    "ctidTraderAccountId": CTRADER_ACCOUNT_ID,
-                    "symbolName": ctrade_symbol,
-                    "orderType": 1,
-                    "tradeSide": trade_side,
-                    "volume": int(volume_lots * 100000),
-                    "timeInForce": 1,
-                }
-            }
-            await ws.send(json.dumps(order_msg))
-            await asyncio.sleep(1)
-            result = await ws.recv()
-            data = json.loads(result)
-            return data
-
-    except Exception as e:
-        raise Exception(f"cTrader trade failed: {str(e)}")
-
-def place_trade(symbol, direction):
-    try:
-        result = asyncio.run(
-            ctrader_place_trade(symbol, direction)
-        )
-        return f"✅ Placed! {result}"
-    except Exception as e:
-        send_message(f"⚠️ Trade failed: {str(e)}")
-        return None
-
-def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, trade_result=None):
+def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, trade_result):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
     action = "SELL" if direction == "SELL" else "BUY"
     risk   = abs(entry - sl)
     reward = abs(tp - entry)
     rr     = round(reward / risk, 2) if risk > 0 else 0
     timestamp = get_timestamp()
-
-    msg = (
+    return (
         f"{emoji} JAM SIGNAL\n"
         f"━━━━━━━━━━━━━━━\n"
         f"📊 Symbol: {symbol}\n"
@@ -212,12 +192,8 @@ def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1, trade_
         f"Bar2 Open: {bar2['open']}\n"
         f"Bar1 Close: {bar1['close']}\n"
         f"━━━━━━━━━━━━━━━\n"
+        f"🤖 Auto Trade: {trade_result}"
     )
-    if trade_result:
-        msg += f"🤖 Auto Trade: {trade_result}"
-    else:
-        msg += f"🤖 Auto Trade: ❌ Failed"
-    return msg
 
 def check_and_alert(display_name, interval, candles, last_signal_time):
     closed = candles[:-1]
@@ -236,7 +212,7 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
                 entry = bar1["close"]
                 sl    = round(bar1["high"] + sl_val, 3)
                 tp    = round(entry - sl_val, 3)
-                trade_result = place_trade(display_name, "SELL")
+                trade_result = place_bybit_trade(display_name, "SELL")
                 send_message(build_message(
                     "SELL", display_name, interval,
                     entry, sl, tp, bar2, bar1, trade_result
@@ -247,7 +223,7 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
                 entry = bar1["close"]
                 sl    = round(bar1["low"] - sl_val, 3)
                 tp    = round(entry + sl_val, 3)
-                trade_result = place_trade(display_name, "BUY")
+                trade_result = place_bybit_trade(display_name, "BUY")
                 send_message(build_message(
                     "BUY", display_name, interval,
                     entry, sl, tp, bar2, bar1, trade_result
@@ -268,7 +244,7 @@ def main():
         "📈 US100  → 5m | 15m | 1h\n"
         "📈 US30   → 5m | 15m | 1h\n"
         "━━━━━━━━━━━━━━━\n"
-        "🤖 Auto Trading: cTrader ENABLED\n"
+        "🤖 Auto Trading: Bybit ENABLED\n"
         "💰 Account: DEMO\n"
         "🕐 Market Hours: Mon-Fri 8AM-12AM IST"
     )
