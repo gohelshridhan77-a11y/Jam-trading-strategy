@@ -91,16 +91,16 @@ def place_bybit_trade(symbol, direction, qty="0.01"):
         }
 
         r = requests.post(
-            f"{BYBIT_BASE_URL}/v5/order/create",
-            headers=headers,
-            data=body,
-            timeout=10
-        )
+    f"{BYBIT_BASE_URL}/v5/order/create",
+    headers=headers,
+    data=body,
+    timeout=10
+)
 
-        try:
-            result = r.json()
-        except Exception:
-            return f"❌ Parse error: {r.text[:100]}"
+try:
+    result = r.json()
+except Exception:
+    return f"❌ Response: {r.text[:200]}"
 
         if result.get("retCode") == 0:
             order_id = result["result"]["orderId"]
