@@ -81,12 +81,11 @@ def place_bybit_trade(symbol, direction, qty="0.01"):
             "qty": qty,
         }
 
+        import json
         timestamp = str(int(time.time() * 1000))
         recv_window = "5000"
-        param_str = timestamp + BYBIT_API_KEY + recv_window
-        for k, v in sorted(params.items()):
-            param_str += f"{k}={v}&"
-        param_str = param_str.rstrip("&")
+        body = json.dumps(params)
+        param_str = timestamp + BYBIT_API_KEY + recv_window + body
 
         signature = hmac.new(
             BYBIT_API_SECRET.encode("utf-8"),
