@@ -19,12 +19,6 @@ INDEX_WATCHLIST = [
     {"symbol": "YM=F", "name": "US30",  "interval": "1h"},
 ]
 
-SL_TP = {
-    "XAU/USD": {"5min": (80,80),   "15min": (150,150), "1h": (300,300), "4h": (600,600)},
-    "US100":   {"5m":   (30,30),   "15m":   (50,50),   "1h": (100,100)},
-    "US30":    {"5m":   (50,50),   "15m":   (100,100), "1h": (200,200)},
-}
-
 def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": text})
@@ -96,7 +90,7 @@ def get_yahoo_candles(symbol, interval):
     except (KeyError, IndexError, TypeError) as e:
         raise Exception(f"Yahoo error for {symbol}: {e}")
 
-def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1):
+def build_message(direction, symbol, interval, entry, sl, tp, bar1):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
     action = "SELL" if direction == "SELL" else "BUY"
     risk   = abs(entry - sl)
@@ -115,7 +109,8 @@ def build_message(direction, symbol, interval, entry, sl, tp, bar2, bar1):
         f"✅ Take Profit: {tp}\n"
         f"⚖️ Risk/Reward: 1:{rr}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"Bar2 Open: {bar2['open']}\n"
+        f"Bar1 High: {bar1['high']}\n"
+        f"Bar1 Low: {bar1['low']}\n"
         f"Bar1 Close: {bar1['close']}"
     )
 
@@ -128,27 +123,32 @@ def check_and_alert(display_name, interval, candles, last_signal_time):
     bar1 = closed[-1]
     key  = f"{display_name}_{interval}"
     current_time = time.time()
-    sl_val, tp_val = SL_TP.get(display_name, {}).get(interval, (100, 100))
 
     if current_time - last_signal_time.get(key, 0) > 300:
         try:
             if check_bearish_setup(bar2, bar1):
                 entry = bar1["close"]
-                sl    = round(bar1["high"] + sl_val, 3)
-                tp    = round(entry - sl_val, 3)
+                # SL = Bar1 high
+                sl = round(bar1["high"], 5)
+                # TP = same pips as SL
+                sl_pips = abs(entry - sl)
+                tp = round(entry - sl_pips, 5)
                 send_message(build_message(
                     "SELL", display_name, interval,
-                    entry, sl, tp, bar2, bar1
+                    entry, sl, tp, bar1
                 ))
                 last_signal_time[key] = current_time
 
             elif check_bullish_setup(bar2, bar1):
                 entry = bar1["close"]
-                sl    = round(bar1["low"] - sl_val, 3)
-                tp    = round(entry + sl_val, 3)
+                # SL = Bar1 low
+                sl = round(bar1["low"], 5)
+                # TP = same pips as SL
+                sl_pips = abs(entry - sl)
+                tp = round(entry + sl_pips, 5)
                 send_message(build_message(
                     "BUY", display_name, interval,
-                    entry, sl, tp, bar2, bar1
+                    entry, sl, tp, bar1
                 ))
                 last_signal_time[key] = current_time
 
@@ -166,7 +166,10 @@ def main():
         "📈 US100  → 5m | 15m | 1h\n"
         "📈 US30   → 5m | 15m | 1h\n"
         "━━━━━━━━━━━━━━━\n"
-        "🕐 Market Hours: Mon-Fri 8AM-12AM IST"
+        "🕐 Market Hours: Mon-Fri 8AM-12AM IST\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📐 Strategy: 75% Wick | SL: Bar1 High/Low\n"
+        "🎯 Target: 1:1 RR"
     )
 
     last_signal_time = {}
