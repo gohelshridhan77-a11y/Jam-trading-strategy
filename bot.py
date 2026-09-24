@@ -11,12 +11,12 @@ TWELVE_API_KEY  = os.environ.get("TWELVE_API_KEY")
 XAUUSD_TIMEFRAMES = ["5min", "15min", "1h", "4h"]
 
 INDEX_WATCHLIST = [
-    {"symbol": "NQ=F", "name": "US100", "interval": "5m"},
-    {"symbol": "NQ=F", "name": "US100", "interval": "15m"},
-    {"symbol": "NQ=F", "name": "US100", "interval": "1h"},
-    {"symbol": "YM=F", "name": "US30",  "interval": "5m"},
-    {"symbol": "YM=F", "name": "US30",  "interval": "15m"},
-    {"symbol": "YM=F", "name": "US30",  "interval": "1h"},
+    {"symbol": "US100", "name": "US100", "interval": "5m"},
+    {"symbol": "US100", "name": "US100", "interval": "15m"},
+    {"symbol": "US100", "name": "US100", "interval": "1h"},
+    {"symbol": "US30",  "name": "US30",  "interval": "5m"},
+    {"symbol": "US30",  "name": "US30",  "interval": "15m"},
+    {"symbol": "US30",  "name": "US30",  "interval": "1h"},
 ]
 
 def send_message(text):
@@ -64,7 +64,55 @@ def get_xauusd_candles(interval):
             continue
     return candles
 
-def get_yahoo_candles(symbol, interval):
+def get_tv_candles(symbol, interval):
+    # Map intervals to TradingView format
+    interval_map = {
+        "5m": "5",
+        "15m": "15",
+        "1h": "60",
+    }
+    tv_interval = interval_map.get(interval, "15")
+
+    # TradingView symbols
+    tv_symbols = {
+        "US100": "SKILLING:US100",
+        "US30": "SKILLING:US30",
+    }
+    tv_symbol = tv_symbols.get(symbol, symbol)
+
+    url = "https://scanner.tradingview.com/america/scan"
+    payload = {
+        "symbols": {"tickers": [tv_symbol]},
+        "columns": [
+            f"open|{tv_interval}",
+            f"high|{tv_interval}",
+            f"low|{tv_interval}",
+            f"close|{tv_interval}",
+        ]
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
+    r = requests.post(url, json=payload, headers=headers)
+    data = r.json()
+
+    if "data" not in data:
+        raise Exception(f"TradingView error: {data}")
+
+    candles = []
+    for item in data["data"]:
+        d = item["d"]
+        try:
+            candles.append({
+                "open":  float(d[0]) if d[0] else 0,
+                "high":  float(d[1]) if d[1] else 0,
+                "low":   float(d[2]) if d[2] else 0,
+                "close": float(d[3]) if d[3] else 0,
+            })
+        except (TypeError, ValueError):
+            continue
+    return candles[-5:] if candles else []
     range_map = {"5m": "2d", "15m": "5d", "1h": "1mo"}
     period = range_map.get(interval, "5d")
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
