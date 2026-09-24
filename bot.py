@@ -257,7 +257,7 @@ def main():
 
         for item in INDEX_WATCHLIST:
             try:
-                candles = get_yahoo_candles(item["symbol"], item["interval"])
+                candles = get_tv_candles(item["symbol"], item["interval"])
                 last_signal_time = check_and_alert(
                     item["name"], item["interval"], candles, last_signal_time
                 )
