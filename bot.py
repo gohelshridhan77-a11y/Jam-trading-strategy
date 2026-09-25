@@ -2,34 +2,27 @@ import time
 import os
 import requests
 from datetime import datetime, timezone, timedelta
-from biquote import Biquote
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID        = os.environ.get("CHAT_ID")
 
-bq = Biquote()
-
 WATCHLIST = [
-    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "15min"},
-    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "1h"},
-    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "4h"},
-    {"symbol": "US100",  "name": "US100",  "interval": "15min"},
-    {"symbol": "US100",  "name": "US100",  "interval": "1h"},
-    {"symbol": "US30",   "name": "US30",   "interval": "15min"},
-    {"symbol": "US30",   "name": "US30",   "interval": "1h"},
+    {"symbol": "XAUUSD", "yahoo": "GC=F",  "name": "XAUUSD", "interval": "15m"},
+    {"symbol": "XAUUSD", "yahoo": "GC=F",  "name": "XAUUSD", "interval": "1h"},
+    {"symbol": "XAUUSD", "yahoo": "GC=F",  "name": "XAUUSD", "interval": "4h"},
+    {"symbol": "US100",  "yahoo": "NQ=F",  "name": "US100",  "interval": "15m"},
+    {"symbol": "US100",  "yahoo": "NQ=F",  "name": "US100",  "interval": "1h"},
+    {"symbol": "US30",   "yahoo": "YM=F",  "name": "US30",   "interval": "15m"},
+    {"symbol": "US30",   "yahoo": "YM=F",  "name": "US30",   "interval": "1h"},
 ]
-
-INTERVAL_MAP = {
-    "5min":  "5m",
-    "15min": "15m",
-    "1h":    "1h",
-    "4h":    "4h",
-}
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": text})
+    try:
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+    except:
+        pass
 
 def get_ist_time():
     utc_now = datetime.now(timezone.utc)
@@ -47,21 +40,39 @@ def get_timestamp():
     ist = get_ist_time()
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
-def get_candles(symbol, interval):
-    bq_interval = INTERVAL_MAP.get(interval, interval)
-    data = bq.ohlc(symbol, interval=bq_interval, limit=10)
-    candles = []
-    for c in data:
-        try:
-            candles.append({
-                "open":  float(c["open"]),
-                "high":  float(c["high"]),
-                "low":   float(c["low"]),
-                "close": float(c["close"]),
-            })
-        except (ValueError, KeyError):
-            continue
-    return candles
+def get_candles_yahoo(yahoo_symbol, interval):
+    range_map = {
+        "15m": "5d",
+        "1h":  "1mo",
+        "4h":  "3mo",
+    }
+    period = range_map.get(interval, "5d")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+    params = {"interval": interval, "range": period}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, params=params, headers=headers, timeout=15)
+    data = r.json()
+    try:
+        ohlc = data["chart"]["result"][0]["indicators"]["quote"][0]
+        candles = []
+        for i in range(len(ohlc["open"])):
+            try:
+                o = ohlc["open"][i]
+                h = ohlc["high"][i]
+                l = ohlc["low"][i]
+                c = ohlc["close"][i]
+                if None not in (o, h, l, c):
+                    candles.append({
+                        "open":  float(o),
+                        "high":  float(h),
+                        "low":   float(l),
+                        "close": float(c),
+                    })
+            except (TypeError, ValueError):
+                continue
+        return candles[-6:]
+    except Exception as e:
+        raise Exception(f"Yahoo error: {str(e)}")
 
 def build_message(direction, name, interval, entry, sl, tp, bar1):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
@@ -163,7 +174,9 @@ def main():
 
         for item in WATCHLIST:
             try:
-                candles = get_candles(item["symbol"], item["interval"])
+                candles = get_candles_yahoo(
+                    item["yahoo"], item["interval"]
+                )
                 last_signal_time = check_and_alert(
                     item["name"], item["interval"],
                     candles, last_signal_time
