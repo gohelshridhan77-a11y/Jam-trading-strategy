@@ -1,26 +1,31 @@
-import requests
 import time
 import os
+import requests
 from datetime import datetime, timezone, timedelta
+from biquote import Biquote
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID         = os.environ.get("CHAT_ID")
-TWELVE_API_KEY  = os.environ.get("TWELVE_API_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID        = os.environ.get("CHAT_ID")
 
-# All symbols via Twelve Data
+bq = Biquote()
+
 WATCHLIST = [
-    {"symbol": "XAU/USD", "name": "XAUUSD", "interval": "5min"},
-    {"symbol": "XAU/USD", "name": "XAUUSD", "interval": "15min"},
-    {"symbol": "XAU/USD", "name": "XAUUSD", "interval": "1h"},
-    {"symbol": "XAU/USD", "name": "XAUUSD", "interval": "4h"},
-    {"symbol": "NDX",     "name": "US100",  "interval": "5min"},
-    {"symbol": "NDX",     "name": "US100",  "interval": "15min"},
-    {"symbol": "NDX",     "name": "US100",  "interval": "1h"},
-    {"symbol": "DJI",     "name": "US30",   "interval": "5min"},
-    {"symbol": "DJI",     "name": "US30",   "interval": "15min"},
-    {"symbol": "DJI",     "name": "US30",   "interval": "1h"},
+    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "15min"},
+    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "1h"},
+    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "4h"},
+    {"symbol": "US100",  "name": "US100",  "interval": "15min"},
+    {"symbol": "US100",  "name": "US100",  "interval": "1h"},
+    {"symbol": "US30",   "name": "US30",   "interval": "15min"},
+    {"symbol": "US30",   "name": "US30",   "interval": "1h"},
 ]
+
+INTERVAL_MAP = {
+    "5min":  "5m",
+    "15min": "15m",
+    "1h":    "1h",
+    "4h":    "4h",
+}
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -43,19 +48,10 @@ def get_timestamp():
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
 def get_candles(symbol, interval):
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "outputsize": 5,
-        "apikey": TWELVE_API_KEY,
-    }
-    r = requests.get(url, params=params)
-    data = r.json()
-    if "values" not in data:
-        raise Exception(f"API error {symbol}: {data.get('message', data)}")
+    bq_interval = INTERVAL_MAP.get(interval, interval)
+    data = bq.ohlc(symbol, interval=bq_interval, limit=10)
     candles = []
-    for c in reversed(data["values"]):
+    for c in data:
         try:
             candles.append({
                 "open":  float(c["open"]),
@@ -105,10 +101,10 @@ def check_and_alert(name, interval, candles, last_signal_time):
     if current_time - last_signal_time.get(key, 0) > 300:
         try:
             if check_bearish_setup(bar2, bar1):
-                entry    = bar1["close"]
-                sl       = round(bar1["high"], 5)
-                sl_pips  = abs(entry - sl)
-                tp       = round(entry - sl_pips, 5)
+                entry   = bar1["close"]
+                sl      = round(bar1["high"], 5)
+                sl_pips = abs(entry - sl)
+                tp      = round(entry - sl_pips, 5)
                 send_message(build_message(
                     "SELL", name, interval,
                     entry, sl, tp, bar1
@@ -116,10 +112,10 @@ def check_and_alert(name, interval, candles, last_signal_time):
                 last_signal_time[key] = current_time
 
             elif check_bullish_setup(bar2, bar1):
-                entry    = bar1["close"]
-                sl       = round(bar1["low"], 5)
-                sl_pips  = abs(entry - sl)
-                tp       = round(entry + sl_pips, 5)
+                entry   = bar1["close"]
+                sl      = round(bar1["low"], 5)
+                sl_pips = abs(entry - sl)
+                tp      = round(entry + sl_pips, 5)
                 send_message(build_message(
                     "BUY", name, interval,
                     entry, sl, tp, bar1
@@ -135,9 +131,9 @@ def main():
     send_message(
         "JAM Trading Bot Running!\n"
         "---------------\n"
-        "XAUUSD: 5m 15m 1h 4h\n"
-        "US100 : 5m 15m 1h\n"
-        "US30  : 5m 15m 1h\n"
+        "XAUUSD: 15m 1h 4h\n"
+        "US100 : 15m 1h\n"
+        "US30  : 15m 1h\n"
         "---------------\n"
         "Strategy : 75% Wick\n"
         "SL       : Bar1 High/Low\n"
@@ -153,21 +149,16 @@ def main():
             ist = get_ist_time()
             if market_was_open:
                 send_message(
-                    "Market Closed!\n"
-                    "Resume Monday 8AM IST"
+                    "Market Closed!\nResume Monday 8AM IST"
                     if ist.weekday() == 4
-                    else "Market Closed!\n"
-                    "Resume Tomorrow 8AM IST"
+                    else "Market Closed!\nResume Tomorrow 8AM IST"
                 )
                 market_was_open = False
             time.sleep(60)
             continue
 
         if not market_was_open:
-            send_message(
-                "Market Open!\n"
-                "JAM Bot Scanning..."
-            )
+            send_message("Market Open!\nJAM Bot Scanning...")
             market_was_open = True
 
         for item in WATCHLIST:
@@ -179,9 +170,9 @@ def main():
                 )
             except Exception as e:
                 send_message(f"Error {item['name']} {item['interval']}: {str(e)}")
-            time.sleep(15)
+            time.sleep(20)
 
-        time.sleep(60)
+        time.sleep(300)
 
 if __name__ == "__main__":
     main()
