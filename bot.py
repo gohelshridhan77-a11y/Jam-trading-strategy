@@ -1,20 +1,24 @@
 import time
 import os
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID        = os.environ.get("CHAT_ID")
+TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID         = os.environ.get("CHAT_ID")
+POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 
+# Polygon.io symbols
 WATCHLIST = [
-    {"symbol": "XAUUSD", "yahoo": "GC=F",  "name": "XAUUSD", "interval": "15m"},
-    {"symbol": "XAUUSD", "yahoo": "GC=F",  "name": "XAUUSD", "interval": "1h"},
-    {"symbol": "XAUUSD", "yahoo": "GC=F",  "name": "XAUUSD", "interval": "4h"},
-    {"symbol": "US100",  "yahoo": "NQ=F",  "name": "US100",  "interval": "15m"},
-    {"symbol": "US100",  "yahoo": "NQ=F",  "name": "US100",  "interval": "1h"},
-    {"symbol": "US30",   "yahoo": "YM=F",  "name": "US30",   "interval": "15m"},
-    {"symbol": "US30",   "yahoo": "YM=F",  "name": "US30",   "interval": "1h"},
+    {"symbol": "C:XAUUSD", "name": "XAUUSD", "interval": "3"},
+    {"symbol": "C:XAUUSD", "name": "XAUUSD", "interval": "5"},
+    {"symbol": "C:XAUUSD", "name": "XAUUSD", "interval": "15"},
+    {"symbol": "I:NDX",    "name": "US100",  "interval": "3"},
+    {"symbol": "I:NDX",    "name": "US100",  "interval": "5"},
+    {"symbol": "I:NDX",    "name": "US100",  "interval": "15"},
+    {"symbol": "I:DJI",    "name": "US30",   "interval": "3"},
+    {"symbol": "I:DJI",    "name": "US30",   "interval": "5"},
+    {"symbol": "I:DJI",    "name": "US30",   "interval": "15"},
 ]
 
 def send_message(text):
@@ -40,39 +44,40 @@ def get_timestamp():
     ist = get_ist_time()
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
-def get_candles_yahoo(yahoo_symbol, interval):
-    range_map = {
-        "15m": "5d",
-        "1h":  "1mo",
-        "4h":  "3mo",
+def get_candles(symbol, interval):
+    # Get date range
+    today = date.today()
+    from_date = (today - timedelta(days=5)).strftime("%Y-%m-%d")
+    to_date = today.strftime("%Y-%m-%d")
+
+    url = (
+        f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range"
+        f"/{interval}/minute/{from_date}/{to_date}"
+    )
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": 10,
+        "apiKey": POLYGON_API_KEY,
     }
-    period = range_map.get(interval, "5d")
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
-    params = {"interval": interval, "range": period}
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, params=params, headers=headers, timeout=15)
+    r = requests.get(url, params=params, timeout=15)
     data = r.json()
-    try:
-        ohlc = data["chart"]["result"][0]["indicators"]["quote"][0]
-        candles = []
-        for i in range(len(ohlc["open"])):
-            try:
-                o = ohlc["open"][i]
-                h = ohlc["high"][i]
-                l = ohlc["low"][i]
-                c = ohlc["close"][i]
-                if None not in (o, h, l, c):
-                    candles.append({
-                        "open":  float(o),
-                        "high":  float(h),
-                        "low":   float(l),
-                        "close": float(c),
-                    })
-            except (TypeError, ValueError):
-                continue
-        return candles[-6:]
-    except Exception as e:
-        raise Exception(f"Yahoo error: {str(e)}")
+
+    if data.get("status") == "ERROR" or "results" not in data:
+        raise Exception(f"Polygon error: {data.get('error', data)}")
+
+    candles = []
+    for c in data["results"]:
+        try:
+            candles.append({
+                "open":  float(c["o"]),
+                "high":  float(c["h"]),
+                "low":   float(c["l"]),
+                "close": float(c["c"]),
+            })
+        except (ValueError, KeyError):
+            continue
+    return candles
 
 def build_message(direction, name, interval, entry, sl, tp, bar1):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
@@ -85,7 +90,7 @@ def build_message(direction, name, interval, entry, sl, tp, bar1):
         f"{emoji} JAM SIGNAL\n"
         f"---------------\n"
         f"Symbol : {name}\n"
-        f"TF     : {interval}\n"
+        f"TF     : {interval}min\n"
         f"Time   : {timestamp}\n"
         f"---------------\n"
         f"Action : {action}\n"
@@ -142,13 +147,14 @@ def main():
     send_message(
         "JAM Trading Bot Running!\n"
         "---------------\n"
-        "XAUUSD: 15m 1h 4h\n"
-        "US100 : 15m 1h\n"
-        "US30  : 15m 1h\n"
+        "XAUUSD: 3m 5m 15m\n"
+        "US100 : 3m 5m 15m\n"
+        "US30  : 3m 5m 15m\n"
         "---------------\n"
         "Strategy : 75% Wick\n"
         "SL       : Bar1 High/Low\n"
         "TP       : 1:1 RR\n"
+        "Data     : Real-Time\n"
         "Hours    : Mon-Fri 8AM-12AM IST"
     )
 
@@ -174,18 +180,21 @@ def main():
 
         for item in WATCHLIST:
             try:
-                candles = get_candles_yahoo(
-                    item["yahoo"], item["interval"]
+                candles = get_candles(
+                    item["symbol"],
+                    item["interval"]
                 )
                 last_signal_time = check_and_alert(
-                    item["name"], item["interval"],
-                    candles, last_signal_time
+                    item["name"],
+                    item["interval"],
+                    candles,
+                    last_signal_time
                 )
             except Exception as e:
-                send_message(f"Error {item['name']} {item['interval']}: {str(e)}")
-            time.sleep(20)
+                send_message(f"Error {item['name']} {item['interval']}m: {str(e)}")
+            time.sleep(15)
 
-        time.sleep(300)
+        time.sleep(180)
 
 if __name__ == "__main__":
     main()
