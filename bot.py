@@ -1,24 +1,21 @@
 import time
 import os
 import requests
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID         = os.environ.get("CHAT_ID")
-POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 
-# Polygon.io symbols
 WATCHLIST = [
-    {"symbol": "C:XAUUSD", "name": "XAUUSD", "interval": "3"},
-    {"symbol": "C:XAUUSD", "name": "XAUUSD", "interval": "5"},
-    {"symbol": "C:XAUUSD", "name": "XAUUSD", "interval": "15"},
-    {"symbol": "I:NDX",    "name": "US100",  "interval": "3"},
-    {"symbol": "I:NDX",    "name": "US100",  "interval": "5"},
-    {"symbol": "I:NDX",    "name": "US100",  "interval": "15"},
-    {"symbol": "I:DJI",    "name": "US30",   "interval": "3"},
-    {"symbol": "I:DJI",    "name": "US30",   "interval": "5"},
-    {"symbol": "I:DJI",    "name": "US30",   "interval": "15"},
+    {"symbol": "OANDA:XAU_USD", "name": "XAUUSD", "interval": "15"},
+    {"symbol": "OANDA:XAU_USD", "name": "XAUUSD", "interval": "60"},
+    {"symbol": "OANDA:XAU_USD", "name": "XAUUSD", "interval": "240"},
+    {"symbol": "OANDA:NAS100_USD", "name": "US100", "interval": "15"},
+    {"symbol": "OANDA:NAS100_USD", "name": "US100", "interval": "60"},
+    {"symbol": "OANDA:US30_USD",   "name": "US30",  "interval": "15"},
+    {"symbol": "OANDA:US30_USD",   "name": "US30",  "interval": "60"},
 ]
 
 def send_message(text):
@@ -45,39 +42,42 @@ def get_timestamp():
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
 def get_candles(symbol, interval):
-    # Get date range
-    today = date.today()
-    from_date = (today - timedelta(days=5)).strftime("%Y-%m-%d")
-    to_date = today.strftime("%Y-%m-%d")
+    import time as t
+    now = int(t.time())
+    # Get enough history based on interval
+    if interval == "15":
+        from_time = now - (15 * 60 * 20)  # 20 candles back
+    elif interval == "60":
+        from_time = now - (60 * 60 * 20)
+    else:
+        from_time = now - (240 * 60 * 20)
 
-    url = (
-        f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range"
-        f"/{interval}/minute/{from_date}/{to_date}"
-    )
+    url = "https://finnhub.io/api/v1/forex/candle"
     params = {
-        "adjusted": "true",
-        "sort": "asc",
-        "limit": 10,
-        "apiKey": POLYGON_API_KEY,
+        "symbol": symbol,
+        "resolution": interval,
+        "from": from_time,
+        "to": now,
+        "token": FINNHUB_API_KEY,
     }
     r = requests.get(url, params=params, timeout=15)
     data = r.json()
 
-    if data.get("status") == "ERROR" or "results" not in data:
-        raise Exception(f"Polygon error: {data.get('error', data)}")
+    if data.get("s") == "no_data" or "o" not in data:
+        raise Exception(f"No data for {symbol}")
 
     candles = []
-    for c in data["results"]:
+    for i in range(len(data["o"])):
         try:
             candles.append({
-                "open":  float(c["o"]),
-                "high":  float(c["h"]),
-                "low":   float(c["l"]),
-                "close": float(c["c"]),
+                "open":  float(data["o"][i]),
+                "high":  float(data["h"][i]),
+                "low":   float(data["l"][i]),
+                "close": float(data["c"][i]),
             })
         except (ValueError, KeyError):
             continue
-    return candles
+    return candles[-6:]
 
 def build_message(direction, name, interval, entry, sl, tp, bar1):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
@@ -85,12 +85,14 @@ def build_message(direction, name, interval, entry, sl, tp, bar1):
     risk   = abs(entry - sl)
     reward = abs(tp - entry)
     rr     = round(reward / risk, 2) if risk > 0 else 0
+    tf_map = {"15": "15min", "60": "1h", "240": "4h"}
+    tf     = tf_map.get(interval, interval)
     timestamp = get_timestamp()
     return (
         f"{emoji} JAM SIGNAL\n"
         f"---------------\n"
         f"Symbol : {name}\n"
-        f"TF     : {interval}min\n"
+        f"TF     : {tf}\n"
         f"Time   : {timestamp}\n"
         f"---------------\n"
         f"Action : {action}\n"
@@ -147,15 +149,15 @@ def main():
     send_message(
         "JAM Trading Bot Running!\n"
         "---------------\n"
-        "XAUUSD: 3m 5m 15m\n"
-        "US100 : 3m 5m 15m\n"
-        "US30  : 3m 5m 15m\n"
+        "XAUUSD: 15m 1h 4h\n"
+        "US100 : 15m 1h\n"
+        "US30  : 15m 1h\n"
         "---------------\n"
-        "Strategy : 75% Wick\n"
-        "SL       : Bar1 High/Low\n"
-        "TP       : 1:1 RR\n"
-        "Data     : Real-Time\n"
-        "Hours    : Mon-Fri 8AM-12AM IST"
+        "Data   : Finnhub Real-Time\n"
+        "Strategy: 75% Wick\n"
+        "SL     : Bar1 High/Low\n"
+        "TP     : 1:1 RR\n"
+        "Hours  : Mon-Fri 8AM-12AM IST"
     )
 
     last_signal_time = {}
@@ -180,21 +182,16 @@ def main():
 
         for item in WATCHLIST:
             try:
-                candles = get_candles(
-                    item["symbol"],
-                    item["interval"]
-                )
+                candles = get_candles(item["symbol"], item["interval"])
                 last_signal_time = check_and_alert(
-                    item["name"],
-                    item["interval"],
-                    candles,
-                    last_signal_time
+                    item["name"], item["interval"],
+                    candles, last_signal_time
                 )
             except Exception as e:
                 send_message(f"Error {item['name']} {item['interval']}m: {str(e)}")
             time.sleep(15)
 
-        time.sleep(180)
+        time.sleep(300)
 
 if __name__ == "__main__":
     main()
