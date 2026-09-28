@@ -9,13 +9,13 @@ CHAT_ID         = os.environ.get("CHAT_ID")
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 
 WATCHLIST = [
-    {"symbol": "OANDA:XAU_USD", "name": "XAUUSD", "interval": "15"},
-    {"symbol": "OANDA:XAU_USD", "name": "XAUUSD", "interval": "60"},
-    {"symbol": "OANDA:XAU_USD", "name": "XAUUSD", "interval": "240"},
-    {"symbol": "OANDA:NAS100_USD", "name": "US100", "interval": "15"},
-    {"symbol": "OANDA:NAS100_USD", "name": "US100", "interval": "60"},
-    {"symbol": "OANDA:US30_USD",   "name": "US30",  "interval": "15"},
-    {"symbol": "OANDA:US30_USD",   "name": "US30",  "interval": "60"},
+    {"symbol": "OANDA:XAU_USD",   "name": "XAUUSD", "interval": "15"},
+    {"symbol": "OANDA:XAU_USD",   "name": "XAUUSD", "interval": "60"},
+    {"symbol": "OANDA:XAU_USD",   "name": "XAUUSD", "interval": "240"},
+    {"symbol": "OANDA:SPX500_USD","name": "US100",  "interval": "15"},
+    {"symbol": "OANDA:SPX500_USD","name": "US100",  "interval": "60"},
+    {"symbol": "OANDA:US30_USD",  "name": "US30",   "interval": "15"},
+    {"symbol": "OANDA:US30_USD",  "name": "US30",   "interval": "60"},
 ]
 
 def send_message(text):
