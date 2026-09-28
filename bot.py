@@ -9,13 +9,13 @@ CHAT_ID         = os.environ.get("CHAT_ID")
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 
 WATCHLIST = [
-    {"symbol": "OANDA:XAU_USD",   "name": "XAUUSD", "interval": "15"},
-    {"symbol": "OANDA:XAU_USD",   "name": "XAUUSD", "interval": "60"},
-    {"symbol": "OANDA:XAU_USD",   "name": "XAUUSD", "interval": "240"},
-    {"symbol": "OANDA:SPX500_USD","name": "US100",  "interval": "15"},
-    {"symbol": "OANDA:SPX500_USD","name": "US100",  "interval": "60"},
-    {"symbol": "OANDA:US30_USD",  "name": "US30",   "interval": "15"},
-    {"symbol": "OANDA:US30_USD",  "name": "US30",   "interval": "60"},
+    {"symbol": "OANDA:XAU_USD",    "name": "XAUUSD", "interval": "15"},
+    {"symbol": "OANDA:XAU_USD",    "name": "XAUUSD", "interval": "60"},
+    {"symbol": "OANDA:XAU_USD",    "name": "XAUUSD", "interval": "240"},
+    {"symbol": "OANDA:NAS100_USD", "name": "US100",  "interval": "15"},
+    {"symbol": "OANDA:NAS100_USD", "name": "US100",  "interval": "60"},
+    {"symbol": "OANDA:US30_USD",   "name": "US30",   "interval": "15"},
+    {"symbol": "OANDA:US30_USD",   "name": "US30",   "interval": "60"},
 ]
 
 def send_message(text):
@@ -42,15 +42,13 @@ def get_timestamp():
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
 def get_candles(symbol, interval):
-    import time as t
-    now = int(t.time())
-    # Get enough history based on interval
+    now = int(time.time())
     if interval == "15":
-        from_time = now - (15 * 60 * 20)  # 20 candles back
+        from_time = now - (15 * 60 * 50)
     elif interval == "60":
-        from_time = now - (60 * 60 * 20)
+        from_time = now - (60 * 60 * 50)
     else:
-        from_time = now - (240 * 60 * 20)
+        from_time = now - (240 * 60 * 50)
 
     url = "https://finnhub.io/api/v1/forex/candle"
     params = {
@@ -63,7 +61,7 @@ def get_candles(symbol, interval):
     r = requests.get(url, params=params, timeout=15)
     data = r.json()
 
-    if data.get("s") == "no_data" or "o" not in data:
+    if data.get("s") != "ok" or "o" not in data:
         raise Exception(f"No data for {symbol}")
 
     candles = []
