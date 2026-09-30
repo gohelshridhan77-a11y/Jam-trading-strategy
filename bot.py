@@ -4,19 +4,25 @@ import requests
 from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID         = os.environ.get("CHAT_ID")
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
+TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID             = os.environ.get("CHAT_ID")
+TICKERLAYER_API_KEY = os.environ.get("TICKERLAYER_API_KEY")
 
 WATCHLIST = [
-    {"symbol": "OANDA:XAU_USD",    "name": "XAUUSD", "interval": "15"},
-    {"symbol": "OANDA:XAU_USD",    "name": "XAUUSD", "interval": "60"},
-    {"symbol": "OANDA:XAU_USD",    "name": "XAUUSD", "interval": "240"},
-    {"symbol": "OANDA:NAS100_USD", "name": "US100",  "interval": "15"},
-    {"symbol": "OANDA:NAS100_USD", "name": "US100",  "interval": "60"},
-    {"symbol": "OANDA:US30_USD",   "name": "US30",   "interval": "15"},
-    {"symbol": "OANDA:US30_USD",   "name": "US30",   "interval": "60"},
+    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "15m"},
+    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "1h"},
+    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "4h"},
+    {"symbol": "US100",  "name": "US100",  "interval": "15m"},
+    {"symbol": "US100",  "name": "US100",  "interval": "1h"},
+    {"symbol": "US30",   "name": "US30",   "interval": "15m"},
+    {"symbol": "US30",   "name": "US30",   "interval": "1h"},
 ]
+
+INTERVAL_MAP = {
+    "15m": 15,
+    "1h":  60,
+    "4h":  240,
+}
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -42,36 +48,32 @@ def get_timestamp():
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
 def get_candles(symbol, interval):
-    now = int(time.time())
-    if interval == "15":
-        from_time = now - (15 * 60 * 50)
-    elif interval == "60":
-        from_time = now - (60 * 60 * 50)
-    else:
-        from_time = now - (240 * 60 * 50)
+    minutes = INTERVAL_MAP.get(interval, 15)
+    now     = int(time.time())
+    from_ts = now - (minutes * 60 * 10)
 
-    url = "https://finnhub.io/api/v1/forex/candle"
+    url = "https://api.tickerlayer.com/v1/history"
     params = {
-        "symbol": symbol,
-        "resolution": interval,
-        "from": from_time,
-        "to": now,
-        "token": FINNHUB_API_KEY,
+        "symbol":   symbol,
+        "interval": interval,
+        "from":     from_ts,
+        "to":       now,
+        "apikey":   TICKERLAYER_API_KEY,
     }
-    r = requests.get(url, params=params, timeout=15)
+    r    = requests.get(url, params=params, timeout=15)
     data = r.json()
 
-    if data.get("s") != "ok" or "o" not in data:
-        raise Exception(f"No data for {symbol}")
+    if not isinstance(data, list) or len(data) == 0:
+        raise Exception(f"No data for {symbol} {interval}: {data}")
 
     candles = []
-    for i in range(len(data["o"])):
+    for c in data:
         try:
             candles.append({
-                "open":  float(data["o"][i]),
-                "high":  float(data["h"][i]),
-                "low":   float(data["l"][i]),
-                "close": float(data["c"][i]),
+                "open":  float(c["open"]),
+                "high":  float(c["high"]),
+                "low":   float(c["low"]),
+                "close": float(c["close"]),
             })
         except (ValueError, KeyError):
             continue
@@ -83,14 +85,12 @@ def build_message(direction, name, interval, entry, sl, tp, bar1):
     risk   = abs(entry - sl)
     reward = abs(tp - entry)
     rr     = round(reward / risk, 2) if risk > 0 else 0
-    tf_map = {"15": "15min", "60": "1h", "240": "4h"}
-    tf     = tf_map.get(interval, interval)
     timestamp = get_timestamp()
     return (
         f"{emoji} JAM SIGNAL\n"
         f"---------------\n"
         f"Symbol : {name}\n"
-        f"TF     : {tf}\n"
+        f"TF     : {interval}\n"
         f"Time   : {timestamp}\n"
         f"---------------\n"
         f"Action : {action}\n"
@@ -151,7 +151,7 @@ def main():
         "US100 : 15m 1h\n"
         "US30  : 15m 1h\n"
         "---------------\n"
-        "Data   : Finnhub Real-Time\n"
+        "Data   : TickerLayer Real-Time\n"
         "Strategy: 75% Wick\n"
         "SL     : Bar1 High/Low\n"
         "TP     : 1:1 RR\n"
@@ -180,14 +180,19 @@ def main():
 
         for item in WATCHLIST:
             try:
-                candles = get_candles(item["symbol"], item["interval"])
+                candles = get_candles(
+                    item["symbol"],
+                    item["interval"]
+                )
                 last_signal_time = check_and_alert(
-                    item["name"], item["interval"],
-                    candles, last_signal_time
+                    item["name"],
+                    item["interval"],
+                    candles,
+                    last_signal_time
                 )
             except Exception as e:
-                send_message(f"Error {item['name']} {item['interval']}m: {str(e)}")
-            time.sleep(15)
+                send_message(f"Error {item['name']} {item['interval']}: {str(e)}")
+            time.sleep(20)
 
         time.sleep(300)
 
