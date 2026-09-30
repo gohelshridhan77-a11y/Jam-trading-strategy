@@ -4,25 +4,21 @@ import requests
 from datetime import datetime, timezone, timedelta
 from jam_strategy import check_bearish_setup, check_bullish_setup
 
-TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID             = os.environ.get("CHAT_ID")
-TICKERLAYER_API_KEY = os.environ.get("TICKERLAYER_API_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID        = os.environ.get("CHAT_ID")
 
-WATCHLIST = [
-    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "15m"},
-    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "1h"},
-    {"symbol": "XAUUSD", "name": "XAUUSD", "interval": "4h"},
-    {"symbol": "US100",  "name": "US100",  "interval": "15m"},
-    {"symbol": "US100",  "name": "US100",  "interval": "1h"},
-    {"symbol": "US30",   "name": "US30",   "interval": "15m"},
-    {"symbol": "US30",   "name": "US30",   "interval": "1h"},
+XAUUSD_INTERVALS = [
+    {"interval": "15",  "name": "15min"},
+    {"interval": "60",  "name": "1h"},
+    {"interval": "240", "name": "4h"},
 ]
 
-INTERVAL_MAP = {
-    "15m": 15,
-    "1h":  60,
-    "4h":  240,
-}
+INDEX_WATCHLIST = [
+    {"yahoo": "NQ=F", "name": "US100", "interval": "15m"},
+    {"yahoo": "NQ=F", "name": "US100", "interval": "1h"},
+    {"yahoo": "YM=F", "name": "US30",  "interval": "15m"},
+    {"yahoo": "YM=F", "name": "US30",  "interval": "1h"},
+]
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -47,39 +43,69 @@ def get_timestamp():
     ist = get_ist_time()
     return ist.strftime("%Y-%m-%d %H:%M IST")
 
-def get_candles(symbol, interval):
-    minutes = INTERVAL_MAP.get(interval, 15)
-    now     = int(time.time())
-    from_ts = now - (minutes * 60 * 10)
-
-    url = "https://api.tickerlayer.com/v1/history"
+def get_kraken_candles(interval):
+    """Real-time XAUUSD from Kraken - no API key needed!"""
+    url = "https://api.kraken.com/0/public/OHLC"
     params = {
-        "symbol":   symbol,
+        "pair": "XAUUSD",
         "interval": interval,
-        "from":     from_ts,
-        "to":       now,
-        "apikey":   TICKERLAYER_API_KEY,
     }
     r    = requests.get(url, params=params, timeout=15)
     data = r.json()
 
-    if not isinstance(data, list) or len(data) == 0:
-        raise Exception(f"No data for {symbol} {interval}: {data}")
+    if data.get("error"):
+        raise Exception(f"Kraken error: {data['error']}")
 
+    result  = data["result"]
+    key     = [k for k in result.keys() if k != "last"][0]
     candles = []
-    for c in data:
+    for c in result[key]:
         try:
             candles.append({
-                "open":  float(c["open"]),
-                "high":  float(c["high"]),
-                "low":   float(c["low"]),
-                "close": float(c["close"]),
+                "open":  float(c[1]),
+                "high":  float(c[2]),
+                "low":   float(c[3]),
+                "close": float(c[4]),
             })
-        except (ValueError, KeyError):
+        except (ValueError, IndexError):
             continue
     return candles[-6:]
 
-def build_message(direction, name, interval, entry, sl, tp, bar1):
+def get_yahoo_candles(symbol, interval):
+    """US100 and US30 from Yahoo Finance"""
+    range_map = {
+        "15m": "5d",
+        "1h":  "1mo",
+    }
+    period  = range_map.get(interval, "5d")
+    url     = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params  = {"interval": interval, "range": period}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r       = requests.get(url, params=params, headers=headers, timeout=15)
+    data    = r.json()
+    try:
+        ohlc    = data["chart"]["result"][0]["indicators"]["quote"][0]
+        candles = []
+        for i in range(len(ohlc["open"])):
+            try:
+                o = ohlc["open"][i]
+                h = ohlc["high"][i]
+                l = ohlc["low"][i]
+                c = ohlc["close"][i]
+                if None not in (o, h, l, c):
+                    candles.append({
+                        "open":  float(o),
+                        "high":  float(h),
+                        "low":   float(l),
+                        "close": float(c),
+                    })
+            except (TypeError, ValueError):
+                continue
+        return candles[-6:]
+    except Exception as e:
+        raise Exception(f"Yahoo error {symbol}: {str(e)}")
+
+def build_message(direction, name, tf_name, entry, sl, tp, bar1):
     emoji  = "🔴 BEARISH" if direction == "SELL" else "🟢 BULLISH"
     action = "SELL" if direction == "SELL" else "BUY"
     risk   = abs(entry - sl)
@@ -90,7 +116,7 @@ def build_message(direction, name, interval, entry, sl, tp, bar1):
         f"{emoji} JAM SIGNAL\n"
         f"---------------\n"
         f"Symbol : {name}\n"
-        f"TF     : {interval}\n"
+        f"TF     : {tf_name}\n"
         f"Time   : {timestamp}\n"
         f"---------------\n"
         f"Action : {action}\n"
@@ -104,14 +130,14 @@ def build_message(direction, name, interval, entry, sl, tp, bar1):
         f"Bar1 C : {bar1['close']}"
     )
 
-def check_and_alert(name, interval, candles, last_signal_time):
+def check_and_alert(name, tf_key, tf_name, candles, last_signal_time):
     closed = candles[:-1]
     if len(closed) < 2:
         return last_signal_time
 
     bar2 = closed[-2]
     bar1 = closed[-1]
-    key  = f"{name}_{interval}"
+    key  = f"{name}_{tf_key}"
     current_time = time.time()
 
     if current_time - last_signal_time.get(key, 0) > 300:
@@ -122,7 +148,7 @@ def check_and_alert(name, interval, candles, last_signal_time):
                 sl_pips = abs(entry - sl)
                 tp      = round(entry - sl_pips, 5)
                 send_message(build_message(
-                    "SELL", name, interval,
+                    "SELL", name, tf_name,
                     entry, sl, tp, bar1
                 ))
                 last_signal_time[key] = current_time
@@ -133,13 +159,13 @@ def check_and_alert(name, interval, candles, last_signal_time):
                 sl_pips = abs(entry - sl)
                 tp      = round(entry + sl_pips, 5)
                 send_message(build_message(
-                    "BUY", name, interval,
+                    "BUY", name, tf_name,
                     entry, sl, tp, bar1
                 ))
                 last_signal_time[key] = current_time
 
         except Exception as e:
-            send_message(f"Error {name} {interval}: {str(e)}")
+            send_message(f"Error {name} {tf_name}: {str(e)}")
 
     return last_signal_time
 
@@ -147,11 +173,10 @@ def main():
     send_message(
         "JAM Trading Bot Running!\n"
         "---------------\n"
-        "XAUUSD: 15m 1h 4h\n"
-        "US100 : 15m 1h\n"
-        "US30  : 15m 1h\n"
+        "XAUUSD: 15m 1h 4h (Kraken)\n"
+        "US100 : 15m 1h (Yahoo)\n"
+        "US30  : 15m 1h (Yahoo)\n"
         "---------------\n"
-        "Data   : TickerLayer Real-Time\n"
         "Strategy: 75% Wick\n"
         "SL     : Bar1 High/Low\n"
         "TP     : 1:1 RR\n"
@@ -159,7 +184,7 @@ def main():
     )
 
     last_signal_time = {}
-    market_was_open = False
+    market_was_open  = False
 
     while True:
         if not is_market_open():
@@ -178,21 +203,32 @@ def main():
             send_message("Market Open!\nJAM Bot Scanning...")
             market_was_open = True
 
-        for item in WATCHLIST:
+        # XAUUSD via Kraken
+        tf_labels = {"15": "15min", "60": "1h", "240": "4h"}
+        for item in XAUUSD_INTERVALS:
             try:
-                candles = get_candles(
-                    item["symbol"],
-                    item["interval"]
-                )
+                candles = get_kraken_candles(item["interval"])
                 last_signal_time = check_and_alert(
-                    item["name"],
-                    item["interval"],
-                    candles,
+                    "XAUUSD", item["interval"],
+                    item["name"], candles,
+                    last_signal_time
+                )
+            except Exception as e:
+                send_message(f"Error XAUUSD {item['name']}: {str(e)}")
+            time.sleep(10)
+
+        # US100 & US30 via Yahoo
+        for item in INDEX_WATCHLIST:
+            try:
+                candles = get_yahoo_candles(item["yahoo"], item["interval"])
+                last_signal_time = check_and_alert(
+                    item["name"], item["interval"],
+                    item["interval"], candles,
                     last_signal_time
                 )
             except Exception as e:
                 send_message(f"Error {item['name']} {item['interval']}: {str(e)}")
-            time.sleep(20)
+            time.sleep(10)
 
         time.sleep(300)
 
